@@ -1,20 +1,18 @@
-"""Shared helpers: purge, serialization, export, channel-layer notifications."""
-import io
+"""Shared helpers: purge, serialization, E2EE payload validation, channel-layer notifications."""
+import base64
+import binascii
 import logging
 import threading
-import zipfile
 from datetime import timedelta
-from zoneinfo import ZoneInfo
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.conf import settings
 from django.utils import timezone
 
-from .models import Conversation, Message
+from .models import Message
 
 log = logging.getLogger("chatnest")
-IST = ZoneInfo("Asia/Kolkata")
 
 
 def purge_old_messages(hours=None):
@@ -60,43 +58,42 @@ def message_dict(m):
         "conversation": m.conversation_id,
         "sender": m.sender.username,
         "sender_id": m.sender_id,
-        "content": m.content,
+        "ciphertext": m.ciphertext,
+        "iv": m.iv,
         "created_at": m.created_at.isoformat(),
         "seen": m.seen_at is not None,
         "seen_at": m.seen_at.isoformat() if m.seen_at else None,
     }
 
 
+MAX_CIPHERTEXT_B64 = 24000  # ~4000 chars of UTF-8 text + 16-byte GCM tag, base64-encoded
+
+
+def b64_len(value):
+    """Decoded length of a strict base64 string, or None if it isn't valid base64."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return len(base64.b64decode(value, validate=True))
+    except (binascii.Error, ValueError):
+        return None
+
+
+def clean_encrypted_payload(content):
+    """Return (ciphertext, iv) if the client sent a well-formed encrypted message, else None.
+    The server can't read the message; it only checks the shape (12-byte IV, >=16-byte ciphertext)."""
+    ct, iv = content.get("ciphertext"), content.get("iv")
+    if b64_len(iv) != 12:
+        return None
+    n = b64_len(ct)
+    if n is None or n < 16 or len(ct) > MAX_CIPHERTEXT_B64:
+        return None
+    return ct, iv
+
+
 def notify_user(user_id, payload):
     layer = get_channel_layer()
     async_to_sync(layer.group_send)(f"user_{user_id}", {"type": "notify", "payload": payload})
-
-
-def conversation_txt(conv: Conversation) -> str:
-    lines = [
-        f"ChatNest conversation #{conv.id}: {conv.user1.username} <-> {conv.user2.username}",
-        f"Exported: {timezone.now().astimezone(IST):%Y-%m-%d %H:%M:%S} IST",
-        "=" * 60,
-    ]
-    for m in conv.messages.select_related("sender"):
-        ts = m.created_at.astimezone(IST).strftime("%Y-%m-%d %H:%M:%S")
-        tick = " [seen]" if m.seen_at else ""
-        lines.append(f"[{ts} IST] {m.sender.username}: {m.content}{tick}")
-    if len(lines) == 3:
-        lines.append("(no messages)")
-    return "\n".join(lines) + "\n"
-
-
-def conversation_filename(conv):
-    return f"chat_{conv.id}_{conv.user1.username}_{conv.user2.username}.txt"
-
-
-def all_conversations_zip() -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for conv in Conversation.objects.select_related("user1", "user2"):
-            zf.writestr(conversation_filename(conv), conversation_txt(conv))
-    return buf.getvalue()
 
 
 _presence_reset_done = False

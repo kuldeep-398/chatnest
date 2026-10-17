@@ -12,7 +12,8 @@ urlpatterns = [
     path("friend-requests/", views.friend_requests),
     path("friend-requests/<int:pk>/<str:action>/", views.respond_request),
     path("conversations/<int:conv_id>/messages/", views.messages),
-    path("admin/conversations/", views.admin_conversations),
-    path("admin/conversations/<int:conv_id>/export/", views.export_conversation),
-    path("admin/export-all/", views.export_all),
+    path("keys/me/", views.my_key),
+    path("keys/<int:user_id>/", views.public_key),
+    # Server-side plaintext export was removed (E2EE). Export now happens in the browser.
+    path("admin/stats/", views.admin_stats),
 ]

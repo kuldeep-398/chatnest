@@ -4,11 +4,15 @@ import AuthPage from './pages/AuthPage.jsx'
 import ChatPage from './pages/ChatPage.jsx'
 import RequestsPage from './pages/RequestsPage.jsx'
 import AdminPage from './pages/AdminPage.jsx'
+import UnlockPage from './pages/UnlockPage.jsx'
 
 function Protected({ children, staff }) {
-  const { user, loading } = useAuth()
-  if (loading) return <div className="h-full grid place-items-center text-wa-muted bg-wa-bg">Loading…</div>
+  const { user, loading, keyState } = useAuth()
+  const wait = <div className="h-full grid place-items-center text-wa-muted bg-wa-bg">Loading…</div>
+  if (loading) return wait
   if (!user) return <Navigate to="/login" replace />
+  if (keyState === 'locked') return <UnlockPage />
+  if (keyState !== 'ready') return wait
   if (staff && !user.is_staff) return <Navigate to="/" replace />
   return children
 }

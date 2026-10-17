@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { conversationKey, decryptMessage } from '../lib/e2ee'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import api from '../lib/api'
 import { useAuth } from '../lib/auth.jsx'
@@ -14,8 +15,24 @@ function listTime(iso) {
   return d.toDateString() === y.toDateString() ? 'Yesterday' : d.toLocaleDateString()
 }
 
+/** Sidebar preview: the last message is decrypted here in the browser. */
+function Preview({ msg, friend }) {
+  const { keys } = useAuth()
+  const [text, setText] = useState('')
+  useEffect(() => {
+    let live = true
+    if (!msg || !friend.public_key || !keys) { setText(''); return }
+    conversationKey(keys.privateKey, friend.public_key, friend.conversation)
+      .then((k) => decryptMessage(k, msg))
+      .then((t) => live && setText(t ?? 'Encrypted message'))
+      .catch(() => live && setText('Encrypted message'))
+    return () => { live = false }
+  }, [msg, friend.public_key, friend.conversation, keys])
+  return text
+}
+
 export default function ChatPage() {
-  const { user, logout } = useAuth()
+  const { user, logout, keyNotice, setKeyNotice } = useAuth()
   const { convId } = useParams()
   const navigate = useNavigate()
   const [friends, setFriends] = useState([])
@@ -59,6 +76,11 @@ export default function ChatPage() {
   return (
     <div className="h-full flex flex-col bg-wa-bg text-wa-text">
       <OfflineBanner show={!connected} />
+      {keyNotice && (
+        <div className="bg-wa-header text-wa-text text-sm text-center py-1.5 border-b border-wa-line">
+          {keyNotice} <button onClick={() => setKeyNotice('')} className="text-wa ml-2 hover:underline">Dismiss</button>
+        </div>
+      )}
       <div className="flex-1 flex min-h-0 xl:max-w-[1600px] xl:mx-auto w-full">
         {/* Sidebar */}
         <aside className={`${activeId ? 'hidden md:flex' : 'flex'} flex-col w-full md:w-[30%] md:min-w-[320px] md:max-w-[440px] bg-wa-panel border-r border-wa-line`}>
@@ -99,7 +121,7 @@ export default function ChatPage() {
                     </div>
                     <div className="flex justify-between items-center gap-2">
                       <span className="text-sm text-wa-muted truncate">
-                        {mine && <Ticks seen={lm.seen} />} {lm ? lm.content : ''}
+                        {mine && <Ticks seen={lm.seen} />} {lm ? <Preview msg={lm} friend={f} /> : ''}
                       </span>
                       {f.unread > 0 && <span className="bg-wa text-wa-bg font-semibold text-xs rounded-full min-w-5 h-5 px-1.5 grid place-items-center">{f.unread}</span>}
                     </div>

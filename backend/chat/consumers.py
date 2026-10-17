@@ -4,7 +4,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from .models import Conversation, Message, Presence, are_friends, friends_of
-from .services import message_dict, reset_presence_once
+from .services import clean_encrypted_payload, message_dict, reset_presence_once
 
 # Custom close codes. The socket is always accepted first so the browser receives
 # these codes (closing before accept() makes the browser see 1006 instead).
@@ -103,13 +103,14 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
     async def receive_json(self, content, **kwargs):
         kind = content.get("type")
         if kind == "message":
-            text = (content.get("content") or "").strip()[:4000]
-            if not text:
+            payload = clean_encrypted_payload(content)  # plaintext "content" is never accepted
+            if payload is None:
+                await self.send_json({"type": "error", "detail": "Invalid encrypted message."})
                 return
             if not await self._still_friends():
                 await self.send_json({"type": "error", "detail": "You are no longer friends."})
                 return
-            msg, unread = await self._save(text)
+            msg, unread = await self._save(*payload)
             await self.channel_layer.group_send(self.group, {
                 "type": "relay", "payload": {"type": "message", "message": msg,
                                              "client_id": content.get("client_id")}})
@@ -155,8 +156,9 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
         return are_friends(self.user, get_user_model()(id=self.other_id))
 
     @database_sync_to_async
-    def _save(self, text):
-        m = Message.objects.create(conversation_id=self.conv_id, sender=self.user, content=text)
+    def _save(self, ciphertext, iv):
+        m = Message.objects.create(conversation_id=self.conv_id, sender=self.user,
+                                   ciphertext=ciphertext, iv=iv)
         m = Message.objects.select_related("sender").get(pk=m.pk)
         unread = Message.objects.filter(conversation_id=self.conv_id, seen_at__isnull=True).exclude(
             sender_id=self.other_id).count()

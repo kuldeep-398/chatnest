@@ -45,12 +45,26 @@ class Conversation(models.Model):
 class Message(models.Model):
     conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name="messages")
     sender = models.ForeignKey(User, on_delete=models.CASCADE, related_name="messages")
-    content = models.TextField(max_length=4000)
+    # End-to-end encrypted: the server only ever sees AES-GCM ciphertext + IV (base64).
+    ciphertext = models.TextField()
+    iv = models.CharField(max_length=32)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     seen_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["created_at", "id"]
+
+
+class UserKey(models.Model):
+    """A user's E2EE key bundle. The private key is wrapped (AES-GCM) with a key derived
+    from the user's password in the browser (PBKDF2), so the server can't use it."""
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name="e2ee_key")
+    public_key = models.TextField()            # ECDH P-256 public key, JWK JSON string
+    wrapped_private_key = models.TextField()   # base64 AES-GCM(pkcs8 private key)
+    salt = models.CharField(max_length=64)     # base64 PBKDF2 salt
+    wrap_iv = models.CharField(max_length=32)  # base64 12-byte IV used for wrapping
+    iterations = models.PositiveIntegerField()
+    updated_at = models.DateTimeField(auto_now=True)
 
 
 class Presence(models.Model):

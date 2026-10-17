@@ -11,7 +11,9 @@ A self-hosted, real-time 1-to-1 text chat app with a WhatsApp-Web-style UI. The 
 - Read receipts: ✓ sent, blue ✓✓ seen. A message counts as seen when the recipient has the chat open and visible, and the sender's view updates live.
 - Live unread badges per conversation in the sidebar.
 - Auto-delete: messages older than `MESSAGE_TTL_HOURS` (default 24) are purged on startup and then every hour by a background thread. There is also a `purge_old_messages` management command.
-- Admin export (staff only): list conversations, export one as a `.txt` file (timestamps in IST, Asia/Kolkata), or export everything as a `.zip`. The backend enforces `IsAdminUser`.
+- **End-to-end encryption** for all messages (browser Web Crypto API, no extra libraries). The server stores only ciphertext. See [End-to-end encryption](#end-to-end-encryption).
+- "Verify encryption" panel in each chat header shows a safety number to compare with your friend.
+- Export chat: anyone can export **their own** conversation as a readable `.txt` from the chat menu. It is decrypted in the browser. The admin page shows aggregate stats only; admins can no longer read or export chats.
 - A "Reconnecting…" banner, with exponential-backoff reconnect.
 - Responsive WhatsApp-like UI. On mobile you see the chat list first, then a full-screen chat with a back arrow.
 
@@ -44,7 +46,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env            # then set SECRET_KEY (e.g. python3 -c "import secrets;print(secrets.token_urlsafe(50))")
 python manage.py migrate
-python manage.py createsuperuser   # this account can use the Admin export page
+python manage.py createsuperuser   # this account can open the Admin stats page
 ```
 
 ### 2. Frontend (build once; Django serves it)
@@ -109,4 +111,36 @@ Manual purge: `python manage.py purge_old_messages [--hours 24]`
 ```bash
 cd backend && source venv/bin/activate && python manage.py test chat
 ```
-The tests cover registration, the friend request flow, non-friends being refused on the WebSocket, message send/typing/seen/presence through the Channels `WebsocketCommunicator` with JWT, the purge deleting messages older than 24h, and admin-only export.
+The tests cover registration, the friend request flow, non-friends being refused on the WebSocket, message send/typing/seen/presence through the Channels `WebsocketCommunicator` with JWT, the purge deleting messages older than 24h, E2EE (the server never stores plaintext and rejects malformed or plaintext payloads, plus auth and validation on the key endpoints), the removed export endpoints (404), and the staff-only stats endpoint.
+
+## End-to-end encryption
+ChatNest encrypts every 1-to-1 message in the browser. The server only relays and stores data it cannot read. Everything is in `frontend/src/lib/e2ee.js` and uses only the built-in Web Crypto API.
+
+**Keys per user**
+1. On register (or the first login after this update, for older accounts), the browser generates an **ECDH P-256 key pair**.
+2. It derives a *wrapping key* from your password with **PBKDF2-SHA256 (600,000 iterations, random 16-byte salt)**, then wraps (encrypts) the private key with **AES-GCM**.
+3. It uploads the public key (JWK) plus the wrapped private key, salt, IV and iteration count (`PUT /api/keys/me/`). Your password and raw private key never leave the browser. The server only checks your password at login, through Django's normal hashed login.
+4. On login on any device, the browser downloads the bundle and unwraps it with your password. The private key is kept as a **non-extractable** `CryptoKey`, meaning JavaScript can use it but cannot read its bytes. It is also cached in IndexedDB, so a page refresh does not ask for your password. If the cache is missing (site data cleared, or a different device after a refresh), you see an "Unlock your messages" screen. Logging out deletes the cached key.
+
+**Keys per conversation**
+`ECDH(my private key, friend's public key)` gives both people the same shared secret. Running **HKDF-SHA256** over it with `info = "conversation:<id>"` gives a 256-bit **AES-GCM** key for that chat.
+
+**Messages**
+Each message is encrypted with AES-GCM and a fresh random 12-byte IV. The socket carries `{ciphertext, iv}` (base64), and the `Message` table has only `ciphertext` and `iv` columns. There is no plaintext column, and the server rejects plaintext. The sidebar preview, the chat view and the export are all decrypted client-side.
+
+**Safety number**
+In the chat menu, open "Verify encryption". It shows SHA-256 of both public keys (sorted, so both sides compute the same value), formatted as 8 groups of 5 digits. If you and your friend see the same digits, you have each other's real keys and the server did not swap them.
+
+**Password changes / resets**
+- The app has no self-service password change. If one is added, it must re-wrap the private key with the new password: unwrap with the old password, wrap with the new one, then `PUT /api/keys/me/` with the same public key.
+- If an admin resets a password (Django admin or `changepassword`), the old wrapped key can't be opened. On the next login the browser creates a **new key pair**, and messages encrypted under the old key show as "Unable to decrypt". The safety number also changes. Messages expire after 24h anyway.
+
+**Limitations (be honest about what E2EE does not protect)**
+- **Metadata is visible** to the server: who is friends with whom, who messages whom and when, message sizes, typing and seen events, and online status.
+- **You must trust the JavaScript the server sends.** A malicious or compromised server could serve modified JS that leaks keys or plaintext. This is the basic limit of web-based E2EE.
+- **Device compromise**: malware or a malicious browser extension on your device can read decrypted messages. Anyone with your password plus database access can unwrap your key, so use a strong password (PBKDF2 slows guessing but can't stop it).
+- **Admins can no longer read chats.** The old server-side export endpoints were removed (`/api/admin/conversations/...` and `/api/admin/export-all/` now return 404). Each user can export only their own chats, in their own browser.
+- No forward secrecy: one static key pair per user, with no ratchet. That's fine for a learning project, but Signal-style protocols do better.
+- Web Crypto needs a secure context: `https://` (the tunnels provide it) or `http://localhost`. Opening the app over plain `http://<LAN-IP>` won't work.
+
+**Upgrading an existing install:** run `python manage.py migrate`. Migration `0002_e2ee` **deletes all existing (plaintext) messages**, drops the `content` column, and adds `ciphertext`/`iv` and the `UserKey` table. Existing users get keys automatically on their next login. A friend who hasn't logged in since the update shows "Waiting for … to log in once", and you can't message them until they do.
