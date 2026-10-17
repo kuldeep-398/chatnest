@@ -4,7 +4,12 @@ from django.db.models import F
 from django.utils import timezone
 
 from .models import Conversation, Message, Presence, are_friends, friends_of
-from .services import message_dict
+from .services import message_dict, reset_presence_once
+
+# Custom close codes. The socket is always accepted first so the browser receives
+# these codes (closing before accept() makes the browser see 1006 instead).
+CLOSE_AUTH = 4001       # missing/expired token -> client refreshes token and reconnects
+CLOSE_FORBIDDEN = 4003  # not a member / not friends -> client stops retrying
 
 
 class NotificationConsumer(AsyncJsonWebsocketConsumer):
@@ -13,8 +18,10 @@ class NotificationConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         user = self.scope["user"]
         if not user.is_authenticated:
-            await self.close(code=4001)
+            await self.accept()
+            await self.close(code=CLOSE_AUTH)
             return
+        await database_sync_to_async(reset_presence_once)()
         self.user = user
         self.group = f"user_{user.id}"
         await self.channel_layer.group_add(self.group, self.channel_name)
@@ -72,13 +79,15 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         user = self.scope["user"]
         if not user.is_authenticated:
-            await self.close(code=4001)
+            await self.accept()
+            await self.close(code=CLOSE_AUTH)
             return
         self.user = user
         self.conv_id = int(self.scope["url_route"]["kwargs"]["conversation_id"])
         self.other_id = await self._authorize()
         if self.other_id is None:
-            await self.close(code=4003)
+            await self.accept()
+            await self.close(code=CLOSE_FORBIDDEN)
             return
         self.group = f"chat_{self.conv_id}"
         await self.channel_layer.group_add(self.group, self.channel_name)
@@ -118,6 +127,11 @@ class ChatConsumer(AsyncJsonWebsocketConsumer):
                 await self.channel_layer.group_send(self.group, {
                     "type": "relay", "payload": {"type": "seen", "ids": ids, "seen_at": seen_at,
                                                  "by": self.user.id}})
+                # Also tell the sender's per-user socket so their sidebar ticks turn blue
+                # even when this chat isn't open on their side.
+                await self.channel_layer.group_send(f"user_{self.other_id}", {"type": "notify", "payload": {
+                    "type": "seen", "conversation": self.conv_id, "ids": ids, "seen_at": seen_at,
+                    "by": self.user.id}})
             await self.channel_layer.group_send(f"user_{self.user.id}", {"type": "notify", "payload": {
                 "type": "unread", "conversation": self.conv_id, "unread": 0}})
 

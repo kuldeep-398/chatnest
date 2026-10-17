@@ -42,6 +42,10 @@ export default function ChatPage() {
         } : f)
         return next.sort((a, b) => (b.last_message?.created_at || '').localeCompare(a.last_message?.created_at || ''))
       })
+    } else if (ev.type === 'seen') {
+      // Recipient read our messages: turn the sidebar tick blue even if the chat isn't open.
+      patch(ev.conversation, (f) => (f.last_message && f.last_message.sender_id !== ev.by && ev.ids?.includes(f.last_message.id)
+        ? { ...f, last_message: { ...f.last_message, seen: true } } : f))
     } else if (ev.type === 'unread') {
       patch(ev.conversation, (f) => ({ ...f, unread: ev.unread }))
     } else if (ev.type === 'friends_changed' || ev.type === 'friend_request') {

@@ -29,6 +29,9 @@ class Base(TransactionTestCase):
         c.force_authenticate(user)
         return c
 
+    def ws(self, user, path):
+        return WebsocketCommunicator(application, f"{path}?token={AccessToken.for_user(user)}")
+
     def befriend(self, a, b):
         FriendRequest.objects.create(from_user=a, to_user=b, status=FriendRequest.ACCEPTED)
         return Conversation.get_or_create_for(a, b)
@@ -64,19 +67,24 @@ class FriendFlowTests(Base):
 
 
 class ChannelsTests(Base):
-    def ws(self, user, path):
-        return WebsocketCommunicator(application, f"{path}?token={AccessToken.for_user(user)}")
 
     def test_non_friends_cannot_chat(self):
         conv = Conversation.get_or_create_for(self.alice, self.carol)
 
         async def run():
+            # Accepted first, then closed with a custom code the browser can see.
             comm = self.ws(self.alice, f"/ws/chat/{conv.id}/")
             ok, _ = await comm.connect()
-            self.assertFalse(ok)
+            self.assertTrue(ok)
+            self.assertEqual(await comm.receive_output(), {"type": "websocket.close", "code": 4003})
             anon = WebsocketCommunicator(application, f"/ws/chat/{conv.id}/")
             ok, _ = await anon.connect()
-            self.assertFalse(ok)
+            self.assertTrue(ok)
+            self.assertEqual(await anon.receive_output(), {"type": "websocket.close", "code": 4001})
+            bad = WebsocketCommunicator(application, "/ws/notifications/?token=garbage")
+            ok, _ = await bad.connect()
+            self.assertTrue(ok)
+            self.assertEqual(await bad.receive_output(), {"type": "websocket.close", "code": 4001})
         async_to_sync(run)()
         self.assertEqual(self.client_for(self.alice).get(f"/api/conversations/{conv.id}/messages/").status_code, 403)
 
@@ -113,6 +121,11 @@ class ChannelsTests(Base):
             seen = await a.receive_json_from()
             self.assertEqual(seen["type"], "seen")
             self.assertEqual(seen["ids"], [got["message"]["id"]])
+            # Sender's per-user socket also gets the seen event (live sidebar ticks).
+            ev = await alice_n.receive_json_from()
+            while ev["type"] != "seen":
+                ev = await alice_n.receive_json_from()
+            self.assertEqual((ev["conversation"], ev["ids"], ev["by"]), (conv.id, [got["message"]["id"]], self.bob.id))
 
             for c in (a, b, alice_n):
                 await c.disconnect()
@@ -127,6 +140,30 @@ class ChannelsTests(Base):
         self.assertIsNotNone(m.seen_at)
         self.assertEqual(Presence.objects.get(user=self.alice).connection_count, 0)
         self.assertIsNotNone(Presence.objects.get(user=self.alice).last_seen)
+
+
+class PresenceResetTests(Base):
+    def test_stale_online_reset_on_first_connect(self):
+        from . import services
+        seen = timezone.now() - timedelta(hours=1)
+        Presence.objects.create(user=self.alice, connection_count=3, last_seen=seen)
+        Presence.objects.create(user=self.carol, connection_count=2, last_seen=seen)
+        services._presence_reset_done = False
+
+        async def run():
+            c = self.ws(self.bob, "/ws/notifications/")
+            self.assertTrue((await c.connect())[0])
+            await c.disconnect()
+        async_to_sync(run)()
+        self.assertTrue(services._presence_reset_done)
+        for u in (self.alice, self.carol):
+            p = Presence.objects.get(user=u)
+            self.assertEqual(p.connection_count, 0)
+            self.assertEqual(p.last_seen, seen)  # last_seen kept
+        # Runs only once per process: a later stale count isn't wiped by new connects.
+        Presence.objects.filter(user=self.alice).update(connection_count=1)
+        services.reset_presence_once()
+        self.assertEqual(Presence.objects.get(user=self.alice).connection_count, 1)
 
 
 class PurgeTests(Base):

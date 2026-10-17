@@ -12,7 +12,7 @@ A self-hosted, real-time 1-to-1 text chat app with a WhatsApp-Web-style UI. The 
 - Live unread badges per conversation in the sidebar.
 - Auto-delete: messages older than `MESSAGE_TTL_HOURS` (default 24) are purged on startup and then every hour by a background thread. There is also a `purge_old_messages` management command.
 - Admin export (staff only): list conversations, export one as a `.txt` file (timestamps in IST, Asia/Kolkata), or export everything as a `.zip`. The backend enforces `IsAdminUser`.
-- A "Server offline – reconnecting…" banner, with exponential-backoff reconnect.
+- A "Reconnecting…" banner, with exponential-backoff reconnect.
 - Responsive WhatsApp-like UI. On mobile you see the chat list first, then a full-screen chat with a back arrow.
 
 ## Architecture
@@ -59,6 +59,8 @@ npm run build        # creates frontend/dist, which Django serves automatically
 cd ../backend && source venv/bin/activate
 python manage.py runserver 8000      # 'daphne' is in INSTALLED_APPS, so this runs the ASGI server
 # or: daphne -b 0.0.0.0 -p 8000 config.asgi:application
+# Static files (Django admin CSS) are served by WhiteNoise. With DEBUG=True nothing extra is needed;
+# with DEBUG=False run `python manage.py collectstatic --noinput` first (output: backend/staticfiles/).
 ```
 Open http://localhost:8000.
 

@@ -97,3 +97,29 @@ def all_conversations_zip() -> bytes:
         for conv in Conversation.objects.select_related("user1", "user2"):
             zf.writestr(conversation_filename(conv), conversation_txt(conv))
     return buf.getvalue()
+
+
+_presence_reset_done = False
+_presence_lock = __import__("threading").Lock()
+
+
+def reset_presence_once():
+    """Reset every user's connection count to 0 (offline) once per server process.
+
+    After a crash, counts are left > 0 and users look 'online' forever. Run lazily on the
+    first socket connect (not in AppConfig.ready, so migrate/tests/shell never touch the DB
+    at import time). last_seen is preserved. If the DB isn't ready, retry on the next connect.
+    """
+    global _presence_reset_done
+    if _presence_reset_done:
+        return
+    with _presence_lock:
+        if _presence_reset_done:
+            return
+        from django.db import DatabaseError
+        from .models import Presence
+        try:
+            Presence.objects.filter(connection_count__gt=0).update(connection_count=0)
+        except DatabaseError:
+            return
+        _presence_reset_done = True
